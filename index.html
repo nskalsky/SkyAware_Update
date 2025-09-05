@@ -1,52 +1,219 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>ESP32 Web Flasher</title>
+  <meta charset="utf-8" />
+  <title>ESP32 Web Flasher (factory + ota_1)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:24px auto}
+    fieldset{border:1px solid #ddd;border-radius:12px;padding:16px;margin:16px 0}
+    legend{padding:0 8px;font-weight:700}
+    .row{display:flex;gap:16px;align-items:center;flex-wrap:wrap}
+    .btn{padding:10px 14px;border-radius:10px;border:1px solid #ccc;background:#f6f6f6;cursor:pointer}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    input[type="text"]{width:140px}
+    #log{background:#0c0f14;color:#e6e6e6;padding:12px;height:260px;overflow:auto;border-radius:8px;font-family:ui-monospace, SFMono-Regular, Menlo, monospace}
+    .hint{color:#666;font-size:.95em}
+    progress{width:260px;height:14px}
+    label{display:block;margin:8px 0 4px}
+  </style>
   <!-- Official UMD bundle -->
-  <script src="https://unpkg.com/esptool-js@0.5.6/bundle.js"></script>
+  <script defer src="https://unpkg.com/esptool-js@0.5.6/bundle.js"></script>
 </head>
 <body>
   <h1>ESP32 Web Flasher</h1>
-  <button id="connect">Connect</button>
-  <input type="file" id="firmware" accept=".bin">
-  <button id="flash" disabled>Flash</button>
+  <p class="hint">Chrome/Edge only. Use HTTPS or <code>http://localhost</code>. The tool will put the chip in bootloader automatically.</p>
+
+  <div class="row">
+    <label>Baud
+      <select id="baud">
+        <option>921600</option>
+        <option>460800</option>
+        <option selected>115200</option>
+      </select>
+    </label>
+    <button id="connect" class="btn">Connect</button>
+    <button id="disconnect" class="btn" disabled>Disconnect</button>
+    <button id="chipInfo" class="btn" disabled>Chip Info</button>
+    <button id="erase" class="btn" disabled>Erase Flash</button>
+    <span id="status">Not connected</span>
+  </div>
+
+  <fieldset>
+    <legend>Images</legend>
+    <div class="row">
+      <div>
+        <label>factory.bin</label>
+        <input type="file" id="factory" accept=".bin" />
+      </div>
+      <div>
+        <label>Address (hex)</label>
+        <input type="text" id="addrFactory" value="0x10000" />
+      </div>
+    </div>
+
+    <div class="row">
+      <div>
+        <label>ota_1.bin</label>
+        <input type="file" id="ota1" accept=".bin" />
+      </div>
+      <div>
+        <label>Address (hex)</label>
+        <input type="text" id="addrOta1" value="0x210000" />
+      </div>
+    </div>
+
+    <p class="hint">Use your real partition layout (app @ <code>0x10000</code> is common; OTA slots are partition-CSV dependent).</p>
+
+    <div class="row">
+      <button id="flash" class="btn" disabled>Flash</button>
+      <progress id="prog" max="100" value="0"></progress>
+      <span id="pct">0%</span>
+    </div>
+  </fieldset>
+
+  <h3>Log</h3>
   <pre id="log"></pre>
 
-<script>
-  let transport, loader;
-  const logEl = document.getElementById('log');
-  const log = m => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+  <script>
+    const $ = (id)=>document.getElementById(id);
+    const logEl = $("log"), statusEl = $("status");
+    const term = {
+      clean(){ logEl.textContent=""; },
+      write(s){ logEl.textContent += s; logEl.scrollTop = logEl.scrollHeight; },
+      writeLine(s){ term.write(s + "\n"); }
+    };
 
-  async function connect() {
-    try {
-      // This is the correct name in the UMD build
-      transport = new TransportWebSerial();
-      await transport.connect();
-      loader = new ESPLoader({
-        transport,
-        baudrate: 921600,
-        terminal: { write: log, writeLine: log }
-      });
-      await loader.initialize();
-      log("Connected to " + await loader.chipName());
-      document.getElementById('flash').disabled = false;
-    } catch (e) { log("Connect error: " + e); }
-  }
+    const ui = {
+      connect: $("connect"), disconnect: $("disconnect"),
+      flash: $("flash"), erase: $("erase"), info: $("chipInfo"),
+      baud: $("baud"), prog: $("prog"), pct: $("pct"),
+      factory: $("factory"), ota1: $("ota1"),
+      addrFactory: $("addrFactory"), addrOta1: $("addrOta1")
+    };
 
-  async function flash() {
-    try {
-      const file = document.getElementById('firmware').files[0];
-      if (!file) return alert("Select a .bin file");
-      const data = new Uint8Array(await file.arrayBuffer());
-      await loader.flash([{data, address: 0x10000}], p => log(`Progress: ${p.toFixed(1)}%`));
-      await loader.hardReset();
-      log("Done!");
-    } catch (e) { log("Flash error: " + e); }
-  }
+    let transport = null, loader = null;
 
-  document.getElementById('connect').onclick = connect;
-  document.getElementById('flash').onclick = flash;
-</script>
+    function setConnected(yes){
+      ui.disconnect.disabled = !yes;
+      ui.flash.disabled = !yes;
+      ui.erase.disabled = !yes;
+      ui.info.disabled = !yes;
+      ui.connect.disabled = yes;
+      statusEl.textContent = yes ? "Connected" : "Not connected";
+    }
+
+    function requireGlobals(){
+      if (!window.ESPLoader || !window.Transport) {
+        throw new Error("esptool-js bundle not loaded (window.ESPLoader/Transport missing).");
+      }
+    }
+
+    function parseHex(s){
+      const v = s.trim().toLowerCase();
+      if (!/^0x[0-9a-f]+$/.test(v)) throw new Error("Invalid hex address: " + s);
+      return parseInt(v, 16);
+    }
+
+    async function fileToU8(input){
+      if (!input.files || !input.files[0]) return null;
+      const buf = await input.files[0].arrayBuffer();
+      return new Uint8Array(buf);
+    }
+
+    async function initializeLoader(l){
+      // Work across versions: prefer connect+sync if initialize() not present
+      if (typeof l.initialize === "function") return l.initialize();
+      if (typeof l.connect === "function") await l.connect();
+      if (typeof l.sync === "function") await l.sync();
+      if (typeof l.flushInput === "function") await l.flushInput();
+    }
+
+    ui.connect.onclick = async () => {
+      try {
+        requireGlobals();
+        if (!("serial" in navigator)) throw new Error("Web Serial not supported. Use Chrome/Edge on HTTPS or localhost.");
+        const device = await navigator.serial.requestPort({ filters: [] }); // prompt user
+        transport = new Transport(device);
+        const baud = parseInt(ui.baud.value, 10);
+        await transport.connect(baud);
+        loader = new ESPLoader({ transport, baudrate: baud, terminal: term });
+        term.clean();
+        term.writeLine("Connecting…");
+        await initializeLoader(loader);
+        setConnected(true);
+        if (typeof loader.chipName === "function") {
+          term.writeLine("Chip: " + await loader.chipName());
+        }
+      } catch (e) {
+        term.writeLine("Connect error: " + e);
+        try { if (transport && transport.disconnect) await transport.disconnect(); } catch {}
+        transport = null; loader = null; setConnected(false);
+      }
+    };
+
+    ui.disconnect.onclick = async () => {
+      try { if (transport && transport.disconnect) await transport.disconnect(); } catch {}
+      transport = null; loader = null; setConnected(false);
+    };
+
+    ui.erase.onclick = async () => {
+      try {
+        term.writeLine("Erasing flash…");
+        if (!loader || typeof loader.eraseFlash !== "function") throw new Error("eraseFlash not available in this bundle.");
+        await loader.eraseFlash();
+        term.writeLine("Erase completed.");
+      } catch(e){ term.writeLine("Erase error: " + e); }
+    };
+
+    ui.info.onclick = async () => {
+      try {
+        const name = typeof loader.chipName === "function" ? await loader.chipName() : "(unknown)";
+        const mac  = typeof loader.readMac === "function"  ? await loader.readMac()  : "(unavailable)";
+        term.writeLine("Chip: " + name);
+        term.writeLine("MAC:  " + mac);
+      } catch(e){ term.writeLine("Chip info error: " + e); }
+    };
+
+    ui.flash.onclick = async () => {
+      ui.prog.value = 0; ui.pct.textContent = "0%";
+      try {
+        const fApp = await fileToU8(ui.factory);
+        const oApp = await fileToU8(ui.ota1);
+        if (!fApp && !oApp) { alert("Select at least one .bin"); return; }
+
+        // Build fileArray for writeFlash: requires string data (byte string), addresses
+        // and flash settings. We keep the image’s own mode/freq/size (“keep”).
+        const fileArray = [];
+        if (fApp) fileArray.push({ address: parseHex(ui.addrFactory.value), data: loader.ui8ToBstr(fApp) });
+        if (oApp) fileArray.push({ address: parseHex(ui.addrOta1.value),    data: loader.ui8ToBstr(oApp) });
+
+        const opts = {
+          fileArray,
+          flashSize: "keep",
+          flashMode: "keep",
+          flashFreq: "keep",
+          eraseAll: false,
+          compress: true,
+          reportProgress: (fileIndex, written, total) => {
+            const pct = total ? (written / total) * 100 : 0;
+            ui.prog.value = Math.max(0, Math.min(100, pct));
+            ui.pct.textContent = ui.prog.value.toFixed(1) + "%";
+          }
+        };
+        term.writeLine("Flashing…");
+        if (typeof loader.writeFlash !== "function") throw new Error("writeFlash not available in this bundle.");
+        await loader.writeFlash(opts);
+        term.writeLine("Done. Resetting…");
+        if (typeof loader.after === "function") await loader.after("hard_reset");
+        term.writeLine("Complete.");
+      } catch(e){ term.writeLine("Flash error: " + e); }
+    };
+
+    // Enable Flash button when files chosen
+    const enableFlashIfReady = () => { $("flash").disabled = !(transport && (ui.factory.files[0] || ui.ota1.files[0])); };
+    ui.factory.onchange = enableFlashIfReady;
+    ui.ota1.onchange = enableFlashIfReady;
+  </script>
 </body>
 </html>
