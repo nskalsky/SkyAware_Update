@@ -2,18 +2,164 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <meta http-equiv="x-ua-compatible" content="ie=edge" />
+  <title>ESP32 Web Flasher (GitHub Pages)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>ESP32 Web Flasher</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:24px auto}
+    pre{background:#0c0f14;color:#e6e6e6;padding:12px;border-radius:8px;height:280px;overflow:auto}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin:8px 0}
+    .btn{padding:8px 12px;border:1px solid #ccc;border-radius:10px;background:#f6f6f6;cursor:pointer}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    input[type="text"]{width:140px}
+    progress{width:240px;height:14px}
+  </style>
 </head>
 <body>
-  <h1>ESP32 Web Flasher (diagnostic)</h1>
-  <pre id="out">loading…</pre>
+  <h1>ESP32 Web Flasher</h1>
+  <div id="ui" style="display:none">
+    <div class="row">
+      <label>Baud
+        <select id="baud"><option>921600</option><option>460800</option><option selected>115200</option></select>
+      </label>
+      <button id="connect" class="btn">Connect</button>
+      <button id="disconnect" class="btn" disabled>Disconnect</button>
+      <button id="chipInfo" class="btn" disabled>Chip Info</button>
+      <button id="erase" class="btn" disabled>Erase</button>
+      <span id="status">Not connected</span>
+    </div>
 
-  <!-- Load LOCAL bundle with cache-buster -->
-  <script src="./esptooljs.bundle.js?v=1"></script>
-  <!-- Your app AFTER the bundle -->
-  <script src="./app.js?v=1" defer></script>
+    <div class="row">
+      <div>factory.bin <input type="file" id="factory" accept=".bin"> @ <input id="addrF" value="0x10000"></div>
+    </div>
+    <div class="row">
+      <div>ota_1.bin   <input type="file" id="ota1" accept=".bin">   @ <input id="addrO" value="0x210000"></div>
+    </div>
+    <div class="row">
+      <button id="flash" class="btn" disabled>Flash</button>
+      <progress id="prog" max="100" value="0"></progress> <span id="pct">0%</span>
+    </div>
+  </div>
+
+  <h3>Log</h3>
+  <pre id="log">loading…</pre>
+
+<script>
+(async () => {
+  const logEl = document.getElementById('log');
+  const log = (m)=>{ logEl.textContent += (logEl.textContent ? "\n" : "") + m; logEl.scrollTop = logEl.scrollHeight; };
+
+  // 1) Dynamically load the LOCAL bundle; only continue after it’s loaded.
+  function loadBundle() {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = './esptooljs.bundle.js?v=1';  // same folder as this HTML
+      s.onload = resolve;
+      s.onerror = () => reject(new Error('Failed to load esptooljs.bundle.js (path/CSP/MIME).'));
+      document.head.appendChild(s);
+    });
+  }
+
+  try { await loadBundle(); }
+  catch (e) { log('ERROR: ' + e.message); return; }
+
+  // 2) Verify globals actually exist
+  const ESPLoader = window.ESPLoader;
+  const TransportCtor = window.TransportWebSerial || window.WebSerialTransport || window.Transport;
+  if (!ESPLoader) { log('ERROR: ESPLoader global missing after bundle load. The file may not be the correct bundle.'); return; }
+  if (!TransportCtor){ log('ERROR: WebSerial transport class missing in this bundle.'); return; }
+
+  log('OK: esptool-js bundle loaded.');
+  document.getElementById('ui').style.display = '';
+
+  // 3) Flasher UI
+  const $ = (id)=>document.getElementById(id);
+  const has = (o,m)=>o && typeof o[m]==='function';
+  const parseHex = s => { const v=s.trim().toLowerCase(); if(!/^0x[0-9a-f]+$/.test(v)) throw new Error('Bad hex: '+s); return parseInt(v,16); };
+  const fileU8 = async inp => inp.files?.[0] ? new Uint8Array(await inp.files[0].arrayBuffer()) : null;
+
+  const term = { write:s=>log(s), writeLine:s=>log(s), clean:()=>{ logEl.textContent=''; } };
+
+  let transport=null, loader=null;
+  function setConnected(yes){
+    $('disconnect').disabled = !yes;
+    $('flash').disabled = !yes;
+    $('chipInfo').disabled = !yes;
+    $('erase').disabled = !yes;
+    $('connect').disabled = yes;
+    $('status').textContent = yes ? 'Connected' : 'Not connected';
+  }
+
+  async function initLoader(l){
+    if (has(l,'initialize')) return l.initialize();
+    if (has(l,'connect')) await l.connect();
+    if (has(l,'sync')) await l.sync();
+    if (has(l,'flush')) await l.flush();
+  }
+
+  $('connect').onclick = async () => {
+    try {
+      if (!('serial' in navigator)) throw new Error('Web Serial not supported (Chrome/Edge over HTTPS).');
+      const port = await navigator.serial.requestPort({});
+      // Some bundles expect (port), some none; handle both
+      transport = (TransportCtor.length>=1) ? new TransportCtor(port) : new TransportCtor();
+      if (has(transport,'connect')) await transport.connect(parseInt($('baud').value,10));
+      loader = new ESPLoader({ transport, baudrate: parseInt($('baud').value,10), terminal: term });
+      term.clean(); log('Connecting…');
+      await initLoader(loader);
+      setConnected(true);
+      if (has(loader,'chipName')) log('Chip: ' + await loader.chipName());
+    } catch (e) {
+      log('Connect error: ' + (e?.message || e));
+      try{ await transport?.disconnect?.(); }catch{}
+      transport = loader = null; setConnected(false);
+    }
+  };
+
+  $('disconnect').onclick = async () => { try{ await transport?.disconnect?.(); }catch{} transport=loader=null; setConnected(false); };
+
+  $('chipInfo').onclick = async () => {
+    try { log('Chip: ' + (has(loader,'chipName')? await loader.chipName() : '(unknown)')); }
+    catch(e){ log('Chip info error: ' + e.message); }
+  };
+
+  $('erase').onclick = async () => {
+    try { log('Erasing…'); if(!has(loader,'eraseFlash')) throw new Error('eraseFlash not available'); await loader.eraseFlash(); log('Erase done.'); }
+    catch(e){ log('Erase error: ' + e.message); }
+  };
+
+  $('factory').onchange = $('ota1').onchange = () => { $('flash').disabled = !(transport && ($('factory').files[0] || $('ota1').files[0])); };
+
+  $('flash').onclick = async () => {
+    $('prog').value=0; $('pct').textContent='0%';
+    try{
+      const f = await fileU8($('factory'));
+      const o = await fileU8($('ota1'));
+      if (!f && !o) return alert('Pick at least one .bin');
+
+      const jobs = [];
+      if (f) jobs.push({ data:f, address: parseHex($('addrF').value) });
+      if (o) jobs.push({ data:o, address: parseHex($('addrO').value) });
+
+      log('Flashing…');
+      if (has(loader,'flash')) {
+        await loader.flash(jobs, pct => { if(Number.isFinite(pct)){ $('prog').value=pct; $('pct').textContent=pct.toFixed(1)+'%'; } });
+      } else if (has(loader,'flashIdfData')) {
+        await loader.flashIdfData(jobs, pct => { if(Number.isFinite(pct)){ $('prog').value=pct; $('pct').textContent=pct.toFixed(1)+'%'; } });
+      } else if (has(loader,'writeFlash')) {
+        const fileArray = jobs.map(j=>({ address:j.address, data: loader.ui8ToBstr(j.data) }));
+        await loader.writeFlash({
+          fileArray, flashSize:'keep', flashMode:'keep', flashFreq:'keep', eraseAll:false, compress:true,
+          reportProgress: (_,w,t)=>{ const p=t?(w/t)*100:0; $('prog').value=p; $('pct').textContent=p.toFixed(1)+'%'; }
+        });
+      } else throw new Error('No compatible flash method in this bundle');
+
+      log('Resetting…');
+      await loader.hardReset?.(); await loader.after?.('hard_reset');
+      log('Complete.');
+    } catch(e){ log('Flash error: ' + (e?.message||e)); }
+  };
+})();
+</script>
 </body>
 </html>
 
