@@ -37,36 +37,31 @@
   const $=id=>document.getElementById(id), logEl=$("log");
   const log = s => { logEl.textContent += (logEl.textContent ? "\n" : "") + s; logEl.scrollTop = logEl.scrollHeight; };
 
-  // 1) Fetch the bundle text and execute it explicitly (works even if <script src> fails)
+  // Try UMD globals first; if missing, dynamically import the module build.
+  let ESPLoader = window.ESPLoader;
+  let TransportCtor = window.TransportWebSerial || window.WebSerialTransport || window.Transport;
+
   try {
-    const r = await fetch("./esptooljs.bundle.js?v=3", {cache:"no-store"});
-    if (!r.ok) throw new Error("HTTP " + r.status + " loading esptooljs.bundle.js");
-    const txt = await r.text();
-    // Execute UMD bundle to define window.ESPLoader & transport
-    new Function(txt)();
+    if (!ESPLoader) {
+      // IMPORTANT: same-folder path to your file on GitHub Pages
+      const mod = await import('./esptooljs.bundle.js?v=4');
+      // The module build should export these:
+      ESPLoader = mod.ESPLoader || ESPLoader;
+      TransportCtor = mod.TransportWebSerial || mod.WebSerialTransport || mod.Transport || TransportCtor;
+    }
   } catch (e) {
-    log("ERROR: couldn't load/execute esptooljs.bundle.js → " + (e.message||e));
-    log("Make sure the file is at: https://nskalsky.github.io/SkyAware_Update/esptooljs.bundle.js");
+    log("ERROR: could not import esptooljs.bundle.js → " + (e?.message || e));
+    log("Ensure the file is at: https://nskalsky.github.io/SkyAware_Update/esptooljs.bundle.js");
     return;
   }
 
-  if (typeof window.ESPLoader !== "function") {
-    log("ERROR: ESPLoader still missing after execution. The file is not the UMD bundle.");
-    return;
-  }
-
-  const TransportCtor = window.TransportWebSerial || window.WebSerialTransport || window.Transport;
-  if (!TransportCtor) {
-    log("ERROR: WebSerial transport class missing in this bundle.");
-    return;
-  }
+  if (typeof ESPLoader !== "function") { log("ERROR: ESPLoader not found in bundle."); return; }
+  if (!TransportCtor) { log("ERROR: WebSerial transport class not found in bundle."); return; }
 
   log("Bundle OK. Ready.");
 
-  // 2) Flasher logic (fixed offsets)
   const OFFSETS = [0x20000, 0x1C0000];
   let transport = null, loader = null;
-
   const term = { write: s => log(s), writeLine: s => log(s), clean: () => { logEl.textContent = ""; } };
 
   function setConnected(yes){
@@ -75,7 +70,6 @@
     $("connect").disabled = yes;
   }
   $("fw").onchange = () => { $("flash").disabled = !(transport && $("fw").files[0]); };
-
   $("connect").disabled = false;
 
   $("connect").onclick = async () => {
@@ -135,3 +129,4 @@
 })();
 </script>
 </html>
+
