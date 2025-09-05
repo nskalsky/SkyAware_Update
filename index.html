@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>ESP Flasher (Factory + OTA_1)</title>
+  <title>ESP SkyAware Update (Factory + OTA_1)</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     body { font-family: system-ui, sans-serif; margin: 20px; }
@@ -21,68 +21,26 @@
   <span id="pct">0%</span>
   <pre id="log"></pre>
 
-  <!-- Load the pre-bundled script -->
-  <script src="https://unpkg.com/esptool-js@0.5.7/bundle.js"></script>
-  <script>
-    const $ = s => document.querySelector(s);
-    const logEl = $('#log'), bar = $('#bar'), pct = $('#pct');
-    const log = m => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
-    const setProgress = n => { const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + '%'; pct.textContent = v + '%'; };
+<script src="https://unpkg.com/esptool-js@0.5.7/bundle.js"></script>
+<script>
+  const ESPL =
+    window.ESPLoader ||
+    (window.esptoolJs && window.esptoolJs.ESPLoader) ||
+    (window.esptool_js && window.esptool_js.ESPLoader) ||
+    (window.esptooljs && window.esptooljs.ESPLoader);
 
-    let port, loader, connected = false;
+  const log = m => { /* ... */ };
 
-    async function flashOnce(buf, offset, onBlock) {
-      const total = buf.length;
-      const blockSize = loader.FLASH_WRITE_SIZE || 0x400;
-      const blocks = await loader.flashDeflBegin(total, total, offset);
-      for (let i = 0; i < blocks; i++) {
-        const s = i * blockSize, e = Math.min(s + blockSize, total);
-        await loader.flashDeflBlock(buf.subarray(s, e), i, 5000);
-        onBlock?.(i + 1, blocks);
-      }
-      await loader.flashDeflFinish(false);
-    }
+  document.getElementById('connect').onclick = async () => {
+    if (!ESPL) return log("❌ ESPLoader global not found.");
+    const port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    const loader = new ESPL({ transport: { device: port }, baudrate: 115200, terminal: { write: log, writeLine: log }});
+    await loader.connect("default_reset", 7, true);
+    // ... rest of your flow ...
+  };
+</script>
 
-    $('#connect').onclick = async () => {
-      try {
-        if (!('serial' in navigator)) return log("❌ Use Chrome/Edge over HTTPS; Web Serial missing.");
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 115200 });
-        loader = new window.ESPLoader({ transport: { device: port }, baudrate: 115200, terminal: { write: log, writeLine: log }});
-        log("Connecting...");
-        await loader.connect("default_reset", 7, true);
-        log("Connected. Chip: " + (await loader.chipName()));
-        await loader.runStub();
-        try { await loader.changeBaud(921600); log("Baud -> 921600"); } catch {}
-        connected = true;
-        $('#disconnect').disabled = false; $('#flash').disabled = false;
-      } catch (e) { log("❌ Connect failed: " + e); }
-    };
-
-    $('#disconnect').onclick = async () => {
-      try { await loader.after("no_reset"); await port.close(); } catch {}
-      connected = false;
-      $('#disconnect').disabled = true; $('#flash').disabled = true;
-      log("Disconnected.");
-    };
-
-    $('#flash').onclick = async () => {
-      if (!connected) return log("Not connected.");
-      const file = $('#fw').files?.[0]; if (!file) return log("Pick a .bin first.");
-      const buf = new Uint8Array(await file.arrayBuffer());
-      const FACTORY = 0x20000, OTA1 = 0x1C0000;
-      try {
-        setProgress(0);
-        log(`Flashing Factory @ 0x${FACTORY.toString(16)}`);
-        await flashOnce(buf, FACTORY, (i,n)=>setProgress((i/n)*50));
-        log(`Flashing OTA_1 @ 0x${OTA1.toString(16)}`);
-        await flashOnce(buf, OTA1, (i,n)=>setProgress(50+(i/n)*50));
-        await loader.after("hard_reset");
-        setProgress(100);
-        log("✅ Done.");
-      } catch (e) { log("❌ Flash failed: " + e); }
-    };
-  </script>
 </body>
 </html>
 
