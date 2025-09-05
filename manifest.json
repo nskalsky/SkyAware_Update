@@ -4,8 +4,15 @@
     {
       "chipFamily": "ESP32-C3",
       "parts": [
-        { "path": "factory.bin", "offset": 131072 },
-        { "path": "ota_0.bin",   "offset": 1835008 }
+        { "path": "skyaware.bin", "offset": 131072 },   // 0x20000
+        { "path": "skyaware.bin", "offset": 1835008 }   // 0x1C0000
+      ]
+    },
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "skyaware.bin", "offset": 131072 },   // 0x20000
+        { "path": "skyaware.bin", "offset": 1835008 }   // 0x1C0000
       ]
     }
   ]
