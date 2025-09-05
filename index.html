@@ -1,105 +1,123 @@
-<!DOCTYPE html>
+<!doctype html>
 <html>
-    <head>
-        <meta charset="utf-8" />
-        <title>ESP Tool</title>
-        <link rel="stylesheet" href="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/css/bootstrap.min.css">
-        <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@4.19.0/css/xterm.css">
-        <link
-            href="https://fonts.googleapis.com/css?family=Orbitron"
-            rel="stylesheet"
-        />
-        <link rel="icon" href="../assets/favicon.ico" />
-         <script src="https://cdn.jsdelivr.net/npm/xterm@4.19.0/lib/xterm.min.js"></script>
-         <script src="https://cdn.jsdelivr.net/npm/crypto-js@4.1.1/crypto-js.js"></script>
-         <script src="https://ajax.googleapis.com/ajax/libs/jquery/2.1.1/jquery.min.js"></script>
-         <script src="https://maxcdn.bootstrapcdn.com/bootstrap/3.4.1/js/bootstrap.min.js"></script>
-    </head>
-    <body>
-        <h1 align="center"><p><img src="../assets/esp-logo.png" width="42" height="42" style="vertical-align:middle" crossorigin></img> ESP Tool</p></h1>
-        <h4 align="center">A Serial Flasher utility for Espressif chips</h4>
-        <div id="safariErr" style="display:none"><p align="center" style="color:red">This tool is not supported on Safari browser!</p>
-        </div>
-        <div align="center">
-            <a class="btn btn-info" href="./docs/index.html">View the API Documentation</a>
+<head>
+  <meta charset="utf-8" />
+  <title>ESP Flasher (Factory + OTA_1)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 20px; }
+    .row { display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+    #log { white-space:pre-wrap; background:#111; color:#0f0; padding:10px; border-radius:6px; min-height:180px; max-height:40vh; overflow:auto; }
+    #progress { width:320px; height:12px; background:#eee; border-radius:6px; overflow:hidden; }
+    #bar { height:100%; width:0%; background:#3b82f6; transition:width .1s linear; }
+  </style>
+</head>
+<body>
+  <h1>ESP Flasher (Factory + OTA_1)</h1>
 
-            <div class="form-check form-check-inline">
-                <input class="form-check-input" type="checkbox" id="debugLogging" value="">
-                <label class="form-check-label" for="debugLogging">Show Debug log</label>
-            </div>
-          </div>
-        <div class="container" id="main">
-            <hr/>
-            <div id="program">
-                <h3> Program </h3>
-                <label for="baudrates" id="lblBaudrate">Baudrate:</label>
-                <label style="display:none" id="lblConnTo">Connected to device: </label>
-                <select name="baudrates" id="baudrates">
-                    <option value="921600">921600</option>
-                    <option value="460800">460800</option>
-                    <option value="230400">230400</option>
-                    <option value="115200">115200</option>
-                </select>
+  <div class="row">
+    <button id="connect">🔌 Connect</button>
+    <button id="disconnect" disabled>🔒 Disconnect</button>
+    <input type="file" id="fw" accept=".bin" />
+    <button id="flash" disabled>⚡ Flash both</button>
+  </div>
 
-                <br><br>
+  <div class="row">
+    <div id="progress"><div id="bar"></div></div>
+    <span id="pct">0%</span>
+  </div>
 
-                <input class="btn btn-info btn-sm" type="button" id="connectButton" value="Connect" />
-                <input class="btn btn-info btn-sm" type="button" id="copyTraceButton" value="Copy Trace" />
-                <input class="btn btn-warning btn-sm" type="button" id="disconnectButton" value="Disconnect" />
-                <input class="btn btn-danger btn-sm" type="button" id="eraseButton" value="Erase Flash" />
-                <br>
+  <pre id="log"></pre>
 
-                <div class="alert alert-danger alert-dismissible" id="alertDiv" style="display:none; margin-top:10px">
-                    <a href="#" class="close" aria-label="close" onclick="$('.alert').hide()">&times;</a>
-                    <span id="alertmsg"></span>
-                </div>
+  <!-- Use ESM import so we don’t rely on a flaky window global -->
+  <script type="module">
+    import { ESPLoader } from "https://unpkg.com/esptool-js@0.5.7/lib/index.js";
 
-                <div id="files">
-                    <table class="table table-striped" id="fileTable">
-                        <thead class="thead-light">
-                            <tr>
-                                <th>Flash Address</th>
-                                <th>File</th>
-                                <th></th>
-                            </tr>
-                        </thead>
-                        <tbody id="tableBody">
-                        </tbody>
-                    </table>
-                    <input class="btn btn-info btn-sm" type="button" id="addFile" value="Add File" />
-                    <input class="btn btn-info btn-sm" type="button" id="programButton" value="Program" />
-                </div>
-                <output id="list"></output>
-                <hr/>
-            </div>
-            <div id="console">
-                <h3>Console </h3>
-                <label style="display:none" id="lblConsoleFor">Connected to device: </label>
-                <label for="consoleBaudrates" id="lblConsoleBaudrate">Baudrate:</label>
-                <select name="consoleBaudrates" id="consoleBaudrates">
-                    <option value="115200">115200</option>
-                    <option value="74880">74880</option>
-                </select>
+    const $ = (s)=>document.querySelector(s);
+    const logEl = $('#log'), bar = $('#bar'), pct = $('#pct');
+    const log = (m="")=>{ logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+    const setProgress = (n)=>{ const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + "%"; pct.textContent = v + "%"; };
 
-                <br><br>
+    let port, loader, connected = false;
 
-                <input class="btn btn-info" type="button" id="consoleStartButton" value="Start" />
-                <input class="btn btn-info" type="button" id="consoleStopButton" value="Stop" />
-                <input class="btn btn-info" type="button" id="resetButton" value="Reset" />
-                <hr/>
-            </div>
-            <div id="terminal"></div>
-        </div>
-        <script src="index.ts" type="module"></script>
-        <script>
-            // Safari 3.0+ "[object HTMLElementConstructor]"
-            var isSafari = /constructor/i.test(window.HTMLElement) || (function (p) { return p.toString() === "[object SafariRemoteNotification]"; })(!window['safari'] || (typeof safari !== 'undefined' && window['safari'].pushNotification));
+    async function withStubBaud(targetBaud = 921600) {
+      await loader.runStub();
+      try { await loader.changeBaud(targetBaud); log(`Baud -> ${targetBaud}`); }
+      catch (e) { log(`Baud change failed: ${e}`); }
+    }
 
-            if(isSafari)
-            {
-               document.getElementById("safariErr").style.display = "inline";
-               document.getElementById("main").style.display = "none";
-            }
-        </script>
-    </body>
+    async function flashOnce(bytes, offset, onBlock) {
+      const total = bytes.length;
+      const blockSize = loader.FLASH_WRITE_SIZE || 0x400;
+      const blocks = await loader.flashDeflBegin(total, total, offset);
+      for (let i = 0; i < blocks; i++) {
+        const s = i * blockSize, e = Math.min(s + blockSize, total);
+        await loader.flashDeflBlock(bytes.subarray(s, e), i, 5000);
+        onBlock?.(i + 1, blocks);
+      }
+      await loader.flashDeflFinish(false);
+    }
+
+    async function verifyMd5(offset, length) {
+      const md5 = await loader.flashMd5sum(offset, length);
+      log(`MD5 @ 0x${offset.toString(16)} = ${md5}`);
+    }
+
+    $('#connect').onclick = async () => {
+      try {
+        if (!('serial' in navigator)) { log("Use Chrome/Edge on desktop (Web Serial)."); return; }
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+
+        loader = new ESPLoader({ transport: { device: port }, baudrate: 115200, terminal: { write: log, writeLine: log }});
+        log("Connecting… (hold BOOT if required)");
+        await loader.connect("default_reset", 7, true);
+        log("Connected. Chip: " + (await loader.chipName()));
+        await withStubBaud(921600);
+
+        connected = true;
+        $('#disconnect').disabled = false;
+        $('#flash').disabled = false;
+      } catch (e) {
+        log("Connect failed: " + e);
+      }
+    };
+
+    $('#disconnect').onclick = async () => {
+      try { if (loader) await loader.after("no_reset"); if (port) await port.close(); } catch {}
+      connected = false;
+      $('#disconnect').disabled = true;
+      $('#flash').disabled = true;
+      log("Disconnected.");
+    };
+
+    $('#flash').onclick = async () => {
+      if (!connected) return log("Not connected.");
+      const file = $('#fw').files?.[0];
+      if (!file) return log("Pick a .bin first.");
+
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const FACTORY = 0x20000;
+      const OTA1    = 0x1C0000;
+
+      try {
+        setProgress(0);
+        log(`--- Flashing Factory @ 0x${FACTORY.toString(16)} ---`);
+        await flashOnce(buf, FACTORY, (i, n) => setProgress((i/n)*50));
+        await verifyMd5(FACTORY, buf.length);
+
+        log(`--- Flashing OTA_1 @ 0x${OTA1.toString(16)} ---`);
+        await flashOnce(buf, OTA1, (i, n) => setProgress(50 + (i/n)*50));
+        await verifyMd5(OTA1, buf.length);
+
+        await loader.after("hard_reset");
+        setProgress(100);
+        log("✅ Done. Device reset.");
+      } catch (e) {
+        log("❌ Flash failed: " + e);
+      }
+    };
+  </script>
+</body>
 </html>
+
