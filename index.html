@@ -15,7 +15,7 @@
   </style>
 </head>
 <body>
-  <h1>ESP Flasher (Factory + OTA_1)</h1>
+  <h1>ESP SKyAware Flasher (Factory + OTA_1)</h1>
 
   <div class="row">
     <button id="connect">🔌 Connect</button>
@@ -34,21 +34,20 @@
   <pre id="log"></pre>
 
 <script type="module">
-  import { ESPLoader } from "https://esm.sh/esptool-js@0.5.7";
+  import { ESPLoader, Transport } from "https://esm.sh/esptool-js@0.5.7";
 
   const $ = (s)=>document.querySelector(s);
   const logEl = $('#log'), bar = $('#bar'), pct = $('#pct');
   const log = (m="") => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
   const setProgress = (n) => { const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + '%'; pct.textContent = v + '%'; };
 
-  // ✅ Provide all three methods ESPLoader expects
   const term = {
     clean() { logEl.textContent = ""; },
     write(data) { log(String(data)); },
     writeLine(data) { log(String(data)); },
   };
 
-  let port, loader, connected = false;
+  let port, transport, loader, connected = false;
 
   async function withStubBaud(targetBaud = 921600) {
     await loader.runStub();
@@ -73,20 +72,24 @@
     log(`MD5 @ 0x${offset.toString(16)} = ${md5}`);
   }
 
-  $('#connect').onclick = async () => {
+  // enable Connect if the environment supports it
+  const connectBtn = document.getElementById('connect');
+  const disconnectBtn = document.getElementById('disconnect');
+  const flashBtn = document.getElementById('flash');
+  if (window.isSecureContext && ('serial' in navigator)) connectBtn.disabled = false;
+
+  connectBtn.onclick = async () => {
     try {
-      if (!('serial' in navigator)) return log("❌ Use Chrome/Edge over HTTPS; Web Serial missing.");
       port = await navigator.serial.requestPort();
       log('Port selected.');
-      await port.open({ baudRate: 115200 });
-      log('Port opened.');
 
-      // 🔧 Use the full terminal object here:
-      loader = new ESPLoader({
-        transport: { device: port },
-        baudrate: 115200,
-        terminal: term,
-      });
+      // ✅ Use Transport wrapper (this provides getInfo, read, write, setRTS/DTR, etc.)
+      transport = new Transport(port);
+      await transport.connect(115200);   // open the port via Transport
+      log('Port opened. ' + transport.getInfo());
+
+      // ✅ Pass the Transport instance to ESPLoader
+      loader = new ESPLoader({ transport, baudrate: 115200, terminal: term });
 
       log('Connecting to bootloader… (hold BOOT if required)');
       await loader.connect('default_reset', 7, true);
@@ -95,25 +98,25 @@
       await withStubBaud(921600);
 
       connected = true;
-      $('#disconnect').disabled = false;
-      $('#flash').disabled = false;
+      disconnectBtn.disabled = false;
+      flashBtn.disabled = false;
       log('✅ Ready to flash.');
     } catch (e) {
       log('❌ Connect failed: ' + e);
     }
   };
 
-  $('#disconnect').onclick = async () => {
-    try { if (loader) await loader.after('no_reset'); if (port) await port.close(); } catch {}
+  disconnectBtn.onclick = async () => {
+    try { if (loader) await loader.after('no_reset'); if (transport) await transport.disconnect(); } catch {}
     connected = false;
-    $('#disconnect').disabled = true;
-    $('#flash').disabled = true;
+    disconnectBtn.disabled = true;
+    flashBtn.disabled = true;
     log('Disconnected.');
   };
 
-  $('#flash').onclick = async () => {
+  flashBtn.onclick = async () => {
     if (!connected) return log('Not connected.');
-    const file = $('#fw').files?.[0];
+    const file = document.getElementById('fw').files?.[0];
     if (!file) return log('Pick a .bin first.');
 
     const FACTORY = 0x20000;
@@ -138,6 +141,7 @@
     }
   };
 </script>
+
 
 </body>
 </html>
