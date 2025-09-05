@@ -1,59 +1,52 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
+  <meta charset="utf-8">
   <title>ESP32 Web Flasher</title>
+  <!-- Official UMD bundle -->
   <script src="https://unpkg.com/esptool-js@0.5.6/bundle.js"></script>
 </head>
 <body>
   <h1>ESP32 Web Flasher</h1>
   <button id="connect">Connect</button>
+  <input type="file" id="firmware" accept=".bin">
   <button id="flash" disabled>Flash</button>
-  <input type="file" id="bin" accept=".bin" />
   <pre id="log"></pre>
 
-  <script>
-    const log = (m) => { 
-      const el = document.getElementById('log');
-      el.textContent += m + "\n";
-      el.scrollTop = el.scrollHeight;
-    };
+<script>
+  let transport, loader;
+  const logEl = document.getElementById('log');
+  const log = m => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
 
-    let loader, transport;
+  async function connect() {
+    try {
+      // This is the correct name in the UMD build
+      transport = new TransportWebSerial();
+      await transport.connect();
+      loader = new ESPLoader({
+        transport,
+        baudrate: 921600,
+        terminal: { write: log, writeLine: log }
+      });
+      await loader.initialize();
+      log("Connected to " + await loader.chipName());
+      document.getElementById('flash').disabled = false;
+    } catch (e) { log("Connect error: " + e); }
+  }
 
-    async function connect() {
-      try {
-        transport = new WebSerialTransport(); // <-- updated class name
-        await transport.connect();
-        loader = new ESPLoader({
-          transport,
-          baudrate: 921600,
-          terminal: { write: log, writeLine: log }
-        });
-        await loader.initialize();
-        log("Connected to chip: " + await loader.chipName());
-        document.getElementById('flash').disabled = false;
-      } catch (e) {
-        log("Connect error: " + e);
-      }
-    }
+  async function flash() {
+    try {
+      const file = document.getElementById('firmware').files[0];
+      if (!file) return alert("Select a .bin file");
+      const data = new Uint8Array(await file.arrayBuffer());
+      await loader.flash([{data, address: 0x10000}], p => log(`Progress: ${p.toFixed(1)}%`));
+      await loader.hardReset();
+      log("Done!");
+    } catch (e) { log("Flash error: " + e); }
+  }
 
-    async function flash() {
-      try {
-        const file = document.getElementById('bin').files[0];
-        if (!file) { alert("Pick a .bin file"); return; }
-        const data = new Uint8Array(await file.arrayBuffer());
-        await loader.flash([{ data, address: 0x10000 }], p => log(`Progress: ${p.toFixed(1)}%`));
-        await loader.hardReset();
-        log("Flash done!");
-      } catch (e) {
-        log("Flash error: " + e);
-      }
-    }
-
-    document.getElementById('connect').onclick = connect;
-    document.getElementById('flash').onclick = flash;
-  </script>
+  document.getElementById('connect').onclick = connect;
+  document.getElementById('flash').onclick = flash;
+</script>
 </body>
 </html>
-
