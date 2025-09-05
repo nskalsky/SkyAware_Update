@@ -17,12 +17,10 @@
     progress{width:260px;height:14px}
     label{display:block;margin:8px 0 4px}
   </style>
-  <!-- Official UMD bundle -->
-  <script defer src="https://unpkg.com/esptool-js@0.5.6/bundle.js"></script>
 </head>
 <body>
   <h1>ESP32 Web Flasher</h1>
-  <p class="hint">Chrome/Edge only. Use HTTPS or <code>http://localhost</code>. The tool will put the chip in bootloader automatically.</p>
+  <p class="hint">Chrome/Edge only. GitHub Pages is HTTPS, so Web Serial works. Select port → choose bins → Flash.</p>
 
   <div class="row">
     <label>Baud
@@ -51,7 +49,6 @@
         <input type="text" id="addrFactory" value="0x10000" />
       </div>
     </div>
-
     <div class="row">
       <div>
         <label>ota_1.bin</label>
@@ -62,9 +59,7 @@
         <input type="text" id="addrOta1" value="0x210000" />
       </div>
     </div>
-
-    <p class="hint">Use your real partition layout (app @ <code>0x10000</code> is common; OTA slots are partition-CSV dependent).</p>
-
+    <p class="hint">Use your real partition layout (e.g., app @ <code>0x10000</code>; OTA slots per your CSV).</p>
     <div class="row">
       <button id="flash" class="btn" disabled>Flash</button>
       <progress id="prog" max="100" value="0"></progress>
@@ -75,145 +70,97 @@
   <h3>Log</h3>
   <pre id="log"></pre>
 
+  <!-- Load LOCAL bundle to avoid CDN/CSP issues -->
+  <script src="./esptooljs.bundle.js"></script>
   <script>
     const $ = (id)=>document.getElementById(id);
     const logEl = $("log"), statusEl = $("status");
-    const term = {
-      clean(){ logEl.textContent=""; },
-      write(s){ logEl.textContent += s; logEl.scrollTop = logEl.scrollHeight; },
-      writeLine(s){ term.write(s + "\n"); }
-    };
+    const term = { clean(){logEl.textContent=""}, write(s){logEl.textContent+=s;logEl.scrollTop=logEl.scrollHeight}, writeLine(s){term.write(s+"\n")} };
+    const ui = { connect:$("connect"), disconnect:$("disconnect"), flash:$("flash"), erase:$("erase"), info:$("chipInfo"),
+                 baud:$("baud"), prog:$("prog"), pct:$("pct"), factory:$("factory"), ota1:$("ota1"),
+                 addrFactory:$("addrFactory"), addrOta1:$("addrOta1") };
 
-    const ui = {
-      connect: $("connect"), disconnect: $("disconnect"),
-      flash: $("flash"), erase: $("erase"), info: $("chipInfo"),
-      baud: $("baud"), prog: $("prog"), pct: $("pct"),
-      factory: $("factory"), ota1: $("ota1"),
-      addrFactory: $("addrFactory"), addrOta1: $("addrOta1")
-    };
+    function getTransportCtor(){ return window.TransportWebSerial || window.WebSerialTransport || window.Transport || null; }
+    function has(o,m){ return o && typeof o[m]==="function"; }
+    function parseHex(s){ const v=s.trim().toLowerCase(); if(!/^0x[0-9a-f]+$/.test(v)) throw new Error("Bad hex: "+s); return parseInt(v,16); }
+    async function fileToU8(inp){ if(!inp.files?.[0]) return null; return new Uint8Array(await inp.files[0].arrayBuffer()); }
 
-    let transport = null, loader = null;
-
-    function setConnected(yes){
-      ui.disconnect.disabled = !yes;
-      ui.flash.disabled = !yes;
-      ui.erase.disabled = !yes;
-      ui.info.disabled = !yes;
-      ui.connect.disabled = yes;
-      statusEl.textContent = yes ? "Connected" : "Not connected";
-    }
-
-    function requireGlobals(){
-      if (!window.ESPLoader || !window.Transport) {
-        throw new Error("esptool-js bundle not loaded (window.ESPLoader/Transport missing).");
-      }
-    }
-
-    function parseHex(s){
-      const v = s.trim().toLowerCase();
-      if (!/^0x[0-9a-f]+$/.test(v)) throw new Error("Invalid hex address: " + s);
-      return parseInt(v, 16);
-    }
-
-    async function fileToU8(input){
-      if (!input.files || !input.files[0]) return null;
-      const buf = await input.files[0].arrayBuffer();
-      return new Uint8Array(buf);
-    }
-
-    async function initializeLoader(l){
-      // Work across versions: prefer connect+sync if initialize() not present
-      if (typeof l.initialize === "function") return l.initialize();
-      if (typeof l.connect === "function") await l.connect();
-      if (typeof l.sync === "function") await l.sync();
-      if (typeof l.flushInput === "function") await l.flushInput();
-    }
+    let transport=null, loader=null;
+    function setConnected(yes){ ui.disconnect.disabled=!yes; ui.flash.disabled=!yes; ui.erase.disabled=!yes; ui.info.disabled=!yes; ui.connect.disabled=yes; statusEl.textContent=yes?"Connected":"Not connected"; }
+    async function initLoader(l){ if(has(l,"initialize")) return l.initialize(); if(has(l,"connect")) await l.connect(); if(has(l,"sync")) await l.sync(); if(has(l,"flush")) await l.flush(); }
 
     ui.connect.onclick = async () => {
-      try {
-        requireGlobals();
-        if (!("serial" in navigator)) throw new Error("Web Serial not supported. Use Chrome/Edge on HTTPS or localhost.");
-        const device = await navigator.serial.requestPort({ filters: [] }); // prompt user
-        transport = new Transport(device);
-        const baud = parseInt(ui.baud.value, 10);
-        await transport.connect(baud);
-        loader = new ESPLoader({ transport, baudrate: baud, terminal: term });
-        term.clean();
-        term.writeLine("Connecting…");
-        await initializeLoader(loader);
+      try{
+        if(!window.ESPLoader) throw new Error("ESPLoader missing (bundle didn’t load)");
+        const T = getTransportCtor(); if(!T) throw new Error("WebSerial transport class missing");
+        if(!("serial" in navigator)) throw new Error("Web Serial not supported (use Chrome/Edge)");
+        const port = await navigator.serial.requestPort({filters:[]});
+        transport = (T.length>=1) ? new T(port) : new T();
+        if(has(transport,"connect")) await transport.connect(parseInt(ui.baud.value,10));
+        loader = new ESPLoader({ transport, baudrate: parseInt(ui.baud.value,10), terminal: term });
+        term.clean(); term.writeLine("Connecting…");
+        await initLoader(loader);
         setConnected(true);
-        if (typeof loader.chipName === "function") {
-          term.writeLine("Chip: " + await loader.chipName());
-        }
-      } catch (e) {
-        term.writeLine("Connect error: " + e);
-        try { if (transport && transport.disconnect) await transport.disconnect(); } catch {}
-        transport = null; loader = null; setConnected(false);
+        if(has(loader,"chipName")) term.writeLine("Chip: " + await loader.chipName());
+      }catch(e){
+        term.writeLine("Connect error: " + (e && e.message ? e.message : e));
+        try{ if(transport?.disconnect) await transport.disconnect(); }catch{}
+        transport=null; loader=null; setConnected(false);
       }
     };
 
-    ui.disconnect.onclick = async () => {
-      try { if (transport && transport.disconnect) await transport.disconnect(); } catch {}
-      transport = null; loader = null; setConnected(false);
+    ui.disconnect.onclick = async () => { try{ if(transport?.disconnect) await transport.disconnect(); }catch{} transport=null; loader=null; setConnected(false); };
+
+    ui.info.onclick = async () => {
+      try{
+        const n = has(loader,"chipName") ? await loader.chipName() : "(unknown)";
+        const m = has(loader,"readMac") ? await loader.readMac() : "(unavailable)";
+        term.writeLine("Chip: "+n); term.writeLine("MAC:  "+m);
+      }catch(e){ term.writeLine("Chip info error: " + e.message); }
     };
 
     ui.erase.onclick = async () => {
-      try {
+      try{
         term.writeLine("Erasing flash…");
-        if (!loader || typeof loader.eraseFlash !== "function") throw new Error("eraseFlash not available in this bundle.");
-        await loader.eraseFlash();
-        term.writeLine("Erase completed.");
-      } catch(e){ term.writeLine("Erase error: " + e); }
-    };
-
-    ui.info.onclick = async () => {
-      try {
-        const name = typeof loader.chipName === "function" ? await loader.chipName() : "(unknown)";
-        const mac  = typeof loader.readMac === "function"  ? await loader.readMac()  : "(unavailable)";
-        term.writeLine("Chip: " + name);
-        term.writeLine("MAC:  " + mac);
-      } catch(e){ term.writeLine("Chip info error: " + e); }
+        if(!has(loader,"eraseFlash")) throw new Error("eraseFlash not supported in this bundle");
+        await loader.eraseFlash(); term.writeLine("Erase completed.");
+      }catch(e){ term.writeLine("Erase error: " + e.message); }
     };
 
     ui.flash.onclick = async () => {
-      ui.prog.value = 0; ui.pct.textContent = "0%";
-      try {
+      ui.prog.value=0; ui.pct.textContent="0%";
+      try{
         const fApp = await fileToU8(ui.factory);
         const oApp = await fileToU8(ui.ota1);
-        if (!fApp && !oApp) { alert("Select at least one .bin"); return; }
+        if(!fApp && !oApp) { alert("Select at least one .bin"); return; }
 
-        // Build fileArray for writeFlash: requires string data (byte string), addresses
-        // and flash settings. We keep the image’s own mode/freq/size (“keep”).
-        const fileArray = [];
-        if (fApp) fileArray.push({ address: parseHex(ui.addrFactory.value), data: loader.ui8ToBstr(fApp) });
-        if (oApp) fileArray.push({ address: parseHex(ui.addrOta1.value),    data: loader.ui8ToBstr(oApp) });
+        const jobs = [];
+        if (fApp) jobs.push({ data:fApp, address: parseHex(ui.addrFactory.value) });
+        if (oApp) jobs.push({ data:oApp, address: parseHex(ui.addrOta1.value) });
 
-        const opts = {
-          fileArray,
-          flashSize: "keep",
-          flashMode: "keep",
-          flashFreq: "keep",
-          eraseAll: false,
-          compress: true,
-          reportProgress: (fileIndex, written, total) => {
-            const pct = total ? (written / total) * 100 : 0;
-            ui.prog.value = Math.max(0, Math.min(100, pct));
-            ui.pct.textContent = ui.prog.value.toFixed(1) + "%";
-          }
-        };
         term.writeLine("Flashing…");
-        if (typeof loader.writeFlash !== "function") throw new Error("writeFlash not available in this bundle.");
-        await loader.writeFlash(opts);
+        if (has(loader,"flash")) {
+          await loader.flash(jobs, (pct)=>{ if(Number.isFinite(pct)){ ui.prog.value=pct; ui.pct.textContent=pct.toFixed(1)+"%"; } });
+        } else if (has(loader,"flashIdfData")) {
+          await loader.flashIdfData(jobs, (pct)=>{ if(Number.isFinite(pct)){ ui.prog.value=pct; ui.pct.textContent=pct.toFixed(1)+"%"; } });
+        } else if (has(loader,"writeFlash")) {
+          const fileArray = jobs.map(j=>({ address:j.address, data: loader.ui8ToBstr(j.data) }));
+          await loader.writeFlash({
+            fileArray, flashSize:"keep", flashMode:"keep", flashFreq:"keep", eraseAll:false, compress:true,
+            reportProgress: (_,w,t)=>{ const pct=t? (w/t)*100:0; ui.prog.value=pct; ui.pct.textContent=pct.toFixed(1)+"%"; }
+          });
+        } else { throw new Error("No compatible flash method in this bundle"); }
+
         term.writeLine("Done. Resetting…");
-        if (typeof loader.after === "function") await loader.after("hard_reset");
+        if (has(loader,"hardReset")) await loader.hardReset();
+        if (has(loader,"after")) await loader.after("hard_reset");
         term.writeLine("Complete.");
-      } catch(e){ term.writeLine("Flash error: " + e); }
+      }catch(e){ term.writeLine("Flash error: " + e.message); }
     };
 
-    // Enable Flash button when files chosen
     const enableFlashIfReady = () => { $("flash").disabled = !(transport && (ui.factory.files[0] || ui.ota1.files[0])); };
-    ui.factory.onchange = enableFlashIfReady;
-    ui.ota1.onchange = enableFlashIfReady;
+    ui.factory.onchange = enableFlashIfReady; ui.ota1.onchange = enableFlashIfReady;
   </script>
 </body>
 </html>
+
