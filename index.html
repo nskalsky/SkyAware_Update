@@ -2,17 +2,92 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <title>SkyAware ESP32 Installer</title>
+  <title>ESP32 Dual-Region Flasher</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:860px;margin:24px auto}
+    .row{margin:12px 0;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+    button{padding:8px 12px;border:1px solid #ccc;border-radius:6px;background:#f6f6f6;cursor:pointer}
+    button:disabled{opacity:.5;cursor:not-allowed}
+    progress{width:260px;height:14px}
+    pre{background:#0c0f14;color:#e6e6e6;padding:12px;border-radius:8px;height:260px;overflow:auto;font-family:ui-monospace}
+  </style>
 </head>
 <body>
-  <h1>Install SkyAware Firmware</h1>
-  <p>Click Install, choose your device, and wait for flashing to complete.</p>
+  <h1>ESP32 Dual-Region Flasher</h1>
+  <p>Select your firmware .bin file; it will be written to <code>0x20000</code> and <code>0x1C0000</code>.</p>
 
-  <esp-web-install-button manifest="manifest.json"></esp-web-install-button>
+  <div class="row">
+    <input type="file" id="firmware" accept=".bin">
+    <button id="connect">Connect</button>
+    <button id="flash" disabled>Flash</button>
+  </div>
 
-  <script type="module"
-    src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module">
+  <div class="row">
+    <progress id="prog" max="100" value="0"></progress>
+    <span id="pct">0%</span>
+  </div>
+
+  <pre id="log">Waiting…</pre>
+
+  <!-- Local esptool-js bundle -->
+  <script src="./esptooljs.bundle.js"></script>
+  <script>
+    const logEl = document.getElementById('log');
+    const log = msg => { logEl.textContent += '\\n'+msg; logEl.scrollTop=logEl.scrollHeight; };
+    const $ = id => document.getElementById(id);
+    let loader, transport;
+
+    const TransportCtor = window.TransportWebSerial || window.WebSerialTransport || window.Transport;
+    if (!TransportCtor || !window.ESPLoader) {
+      log('ERROR: esptool-js bundle missing or incorrect.');
+      throw new Error('Bundle missing');
+    }
+
+    $('connect').onclick = async () => {
+      try {
+        const port = await navigator.serial.requestPort({});
+        transport = (TransportCtor.length>=1) ? new TransportCtor(port) : new TransportCtor();
+        await transport.connect(115200);
+        loader = new ESPLoader({ transport, baudrate: 921600, terminal: { write: log, writeLine: log } });
+        logEl.textContent = 'Connecting...';
+        await loader.initialize();
+        log('Connected to ' + await loader.chipName());
+        $('flash').disabled = false;
+      } catch(e){ log('Connect error: '+e); }
+    };
+
+    $('flash').onclick = async () => {
+      const file = $('firmware').files[0];
+      if (!file) { alert('Select a .bin first.'); return; }
+      const data = new Uint8Array(await file.arrayBuffer());
+
+      // Create two jobs with the SAME data
+      const jobs = [
+        { data, address: 0x20000 },
+        { data, address: 0x1C0000 }
+      ];
+
+      log('Flashing…');
+      $('prog').value = 0; $('pct').textContent = '0%';
+
+      const update = pct => { $('prog').value = pct; $('pct').textContent = pct.toFixed(1)+'%'; };
+
+      if (loader.flash) {
+        await loader.flash(jobs, update);
+      } else if (loader.flashIdfData) {
+        await loader.flashIdfData(jobs, update);
+      } else {
+        const fileArray = jobs.map(j => ({ address:j.address, data: loader.ui8ToBstr(j.data) }));
+        await loader.writeFlash({
+          fileArray, flashSize:"keep", flashMode:"keep", flashFreq:"keep", eraseAll:false, compress:true,
+          reportProgress: (_,written,total) => { const p = total? (written/total)*100:0; update(p); }
+        });
+      }
+
+      await loader.hardReset?.();
+      log('Flashing complete.');
+    };
   </script>
 </body>
 </html>
