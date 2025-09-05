@@ -1,0 +1,12 @@
+{
+  "name": "SkyAware Firmware",
+  "builds": [
+    {
+      "chipFamily": "ESP32-C3",
+      "parts": [
+        { "path": "factory.bin", "offset": 131072 },
+        { "path": "ota_0.bin",   "offset": 1835008 }
+      ]
+    }
+  ]
+}
