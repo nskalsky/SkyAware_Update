@@ -2,29 +2,23 @@
 <meta charset="utf-8">
 <title>ESP32 Dual-Region Flasher</title>
 <style>
-  body{font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;max-width:720px;margin:24px auto}
-  .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:10px 0}
-  button{padding:8px 12px;border:1px solid #ccc;border-radius:8px;background:#f6f6f6;cursor:pointer}
+  body{font-family:system-ui,Segoe UI,Roboto,sans-serif;max-width:700px;margin:24px auto}
+  .row{margin:10px 0;display:flex;gap:12px;flex-wrap:wrap;align-items:center}
+  button{padding:8px 14px;border:1px solid #ccc;border-radius:8px;background:#f0f0f0;cursor:pointer}
   button:disabled{opacity:.5;cursor:not-allowed}
-  progress{width:260px;height:14px}
-  pre{background:#0c0f14;color:#e6e6e6;padding:12px;border-radius:8px;height:220px;overflow:auto;font-family:ui-monospace}
+  progress{width:250px;height:14px}
+  pre{background:#111;color:#eee;padding:10px;border-radius:6px;height:200px;overflow:auto;font-family:monospace}
 </style>
 
 <h1>ESP32 Dual-Region Flasher</h1>
-<p>This writes your selected <code>.bin</code> to <b>0x20000</b> and <b>0x1C0000</b>. Offsets are locked.</p>
+<p>Writes your chosen <code>.bin</code> to <b>0x20000</b> and <b>0x1C0000</b>. (Chrome/Edge only.)</p>
 
 <div class="row">
   <input type="file" id="fw" accept=".bin">
-  <label>Baud
-    <select id="baud"><option>921600</option><option>460800</option><option selected>115200</option></select>
-  </label>
-</div>
-
-<div class="row">
+  <select id="baud"><option>921600</option><option selected>115200</option></select>
   <button id="connect">Connect</button>
-  <button id="flash" disabled>Flash (0x20000 & 0x1C0000)</button>
+  <button id="flash" disabled>Flash</button>
   <button id="disconnect" disabled>Disconnect</button>
-  <span id="status">Not connected</span>
 </div>
 
 <div class="row">
@@ -32,93 +26,55 @@
   <span id="pct">0%</span>
 </div>
 
-<pre id="log">Loading flasher…</pre>
+<pre id="log">Load this on GitHub Pages over HTTPS in Chrome/Edge.</pre>
 
+<!-- IMPORTANT: relative path; both files live in the same folder -->
+<script src="./esptooljs.bundle.js?v=2"></script>
 <script>
-(async () => {
-  const $ = id => document.getElementById(id);
-  const logEl = $('log');
-  const log = s => { logEl.textContent += (logEl.textContent ? "\n" : "") + s; logEl.scrollTop = logEl.scrollHeight; };
+const $=id=>document.getElementById(id),logEl=$("log");
+const log=m=>{logEl.textContent+=(logEl.textContent?"\n":"")+m;logEl.scrollTop=logEl.scrollHeight;}
+const OFFSETS=[0x20000,0x1C0000];
+let loader,transport;
 
-  // Load esptool-js from CDN (unpkg -> jsDelivr). If both fail, instruct to host locally.
-  async function load(url){ return new Promise((res,rej)=>{ const s=document.createElement('script'); s.src=url; s.onload=res; s.onerror=()=>rej(new Error(url)); document.head.appendChild(s); }); }
-  try { await load("https://unpkg.com/esptool-js@0.5.6/bundle.js"); }
-  catch { try { log("unpkg blocked, trying jsDelivr…"); await load("https://cdn.jsdelivr.net/npm/esptool-js@0.5.6/bundle.js"); }
-          catch { log("ERROR: Could not load esptool-js. Host a local copy named esptooljs.bundle.js and add:");
-                 log('<script src="./esptooljs.bundle.js"></script>'); return; } }
+const T=window.TransportWebSerial||window.WebSerialTransport||window.Transport;
+if(!window.ESPLoader||!T){log("ERROR: bundle missing globals.");throw new Error("Bad bundle");}
 
-  if (!window.ESPLoader) { log("ERROR: esptool-js loaded but ESPLoader global missing."); return; }
-  const TransportCtor = window.TransportWebSerial || window.WebSerialTransport || window.Transport;
-  if (!TransportCtor) { log("ERROR: WebSerial transport class missing in this bundle."); return; }
-  log("Flasher ready.");
+$("fw").onchange=()=>{$("flash").disabled=!(transport&&$("fw").files[0]);};
 
-  const OFFSETS = [0x20000, 0x1C0000];
-  const term = { write: s => log(s), writeLine: s => log(s), clean: () => { logEl.textContent = ""; } };
-  let transport = null, loader = null;
+$("connect").onclick=async()=>{
+  try{
+    if(!("serial" in navigator)) throw new Error("Use Chrome/Edge over HTTPS.");
+    const port=await navigator.serial.requestPort({});
+    const baud=parseInt($("baud").value,10);
+    transport=(T.length>=1)?new T(port):new T();
+    if(transport.connect) await transport.connect(baud);
+    loader=new ESPLoader({transport,baudrate:baud,terminal:{write:log,writeLine:log}});
+    logEl.textContent="Connecting...";
+    if(loader.initialize) await loader.initialize(); else { await loader.connect?.(); await loader.sync?.(); await loader.flush?.(); }
+    log("Connected to "+(await loader.chipName?.()||"ESP32"));
+    $("connect").disabled=true;$("disconnect").disabled=false;
+    $("flash").disabled=!(!$("fw").files.length);
+  }catch(e){log("Connect error: "+(e?.message||e));}
+};
 
-  function setConnected(yes){
-    $('disconnect').disabled = !yes;
-    $('flash').disabled = !yes || !$('fw').files[0];
-    $('connect').disabled = yes;
-    $('status').textContent = yes ? "Connected" : "Not connected";
-  }
-  $('fw').onchange = () => { $('flash').disabled = !(transport && $('fw').files[0]); };
+$("disconnect").onclick=async()=>{try{await transport?.disconnect?.()}catch{} transport=null;loader=null;
+  $("connect").disabled=false;$("disconnect").disabled=true;$("flash").disabled=true;};
 
-  $('connect').onclick = async () => {
-    try {
-      if (!('serial' in navigator)) throw new Error('Web Serial not supported (use Chrome/Edge over HTTPS).');
-      const port = await navigator.serial.requestPort({});
-      const baud = parseInt($('baud').value, 10);
-      transport = (TransportCtor.length >= 1) ? new TransportCtor(port) : new TransportCtor();
-      if (typeof transport.connect === 'function') await transport.connect(baud);
-      loader = new ESPLoader({ transport, baudrate: baud, terminal: term });
-      term.clean(); log("Connecting…");
-      if (loader.initialize) await loader.initialize(); else { await loader.connect?.(); await loader.sync?.(); await loader.flush?.(); }
-      setConnected(true);
-      if (loader.chipName) log("Chip: " + await loader.chipName());
-    } catch (e) {
-      log("Connect error: " + (e?.message || e));
-      try { await transport?.disconnect?.(); } catch {}
-      transport = loader = null; setConnected(false);
+$("flash").onclick=async()=>{
+  try{
+    const file=$("fw").files[0]; if(!file) return alert("Select .bin");
+    const data=new Uint8Array(await file.arrayBuffer());
+    const jobs=OFFSETS.map(addr=>({data,address:addr}));
+    $("prog").value=0;$("pct").textContent="0%"; log(`Flashing ${file.name} to 0x20000 and 0x1C0000…`);
+    const prog=p=>{ if(Number.isFinite(p)){ $("prog").value=p; $("pct").textContent=p.toFixed(1)+"%"; } };
+    if(loader.flash) await loader.flash(jobs,prog);
+    else if(loader.flashIdfData) await loader.flashIdfData(jobs,prog);
+    else{
+      const arr=jobs.map(j=>({address:j.address,data:loader.ui8ToBstr(j.data)}));
+      await loader.writeFlash({fileArray:arr,flashSize:"keep",flashMode:"keep",flashFreq:"keep",eraseAll:false,compress:true,
+        reportProgress:(_,w,t)=>{ const p=t?(w/t)*100:0; prog(p); }});
     }
-  };
-
-  $('disconnect').onclick = async () => { try { await transport?.disconnect?.(); } catch {} transport=loader=null; setConnected(false); };
-
-  function updatePct(p){ $('prog').value = p; $('pct').textContent = (Number.isFinite(p) ? p.toFixed(1) : p) + "%"; }
-
-  $('flash').onclick = async () => {
-    try {
-      const f = $('fw').files[0];
-      if (!f) { alert("Pick a .bin first."); return; }
-      const data = new Uint8Array(await f.arrayBuffer());
-      log(`Flashing ${f.name} (${data.length} bytes) to 0x20000 and 0x1C0000…`);
-      updatePct(0);
-
-      const jobs = OFFSETS.map(addr => ({ data, address: addr }));
-
-      if (typeof loader.flash === 'function') {
-        await loader.flash(jobs, p => { if (Number.isFinite(p)) updatePct(p); });
-      } else if (typeof loader.flashIdfData === 'function') {
-        await loader.flashIdfData(jobs, p => { if (Number.isFinite(p)) updatePct(p); });
-      } else if (typeof loader.writeFlash === 'function') {
-        const fileArray = jobs.map(j => ({ address: j.address, data: loader.ui8ToBstr(j.data) }));
-        await loader.writeFlash({
-          fileArray, flashSize: "keep", flashMode: "keep", flashFreq: "keep", eraseAll: false, compress: true,
-          reportProgress: (_, w, t) => { const p = t ? (w / t) * 100 : 0; updatePct(p); }
-        });
-      } else {
-        throw new Error("No compatible flash method in bundle.");
-      }
-
-      log("Done. Resetting…");
-      await loader.hardReset?.();
-      log("Complete.");
-    } catch (e) {
-      log("Flash error: " + (e?.message || e));
-    }
-  };
-})();
+    log("Done. Resetting…"); await loader.hardReset?.(); log("Complete.");
+  }catch(e){log("Flash error: "+(e?.message||e));}
+};
 </script>
-
-
