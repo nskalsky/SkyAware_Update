@@ -31,7 +31,10 @@
 
   <pre id="log"></pre>
 
-  <script type="module">
+  <!-- Single-file UMD bundle from Espressif (no modules, no bundlers) -->
+  <script src="https://unpkg.com/esptool-js@0.5.7/bundle.js"></script>
+
+  <script>
     // ===== UI helpers =====
     const $ = s => document.querySelector(s);
     const connectBtn = $('#connect'), disconnectBtn = $('#disconnect'), flashBtn = $('#flash'), fwInput = $('#fw');
@@ -41,53 +44,32 @@
 
     log(`page loaded. secure=${window.isSecureContext} webSerial=${'serial' in navigator}`);
 
-    // ===== Dynamic loader: try ESM, then UMD fallback =====
-    let ESPLoaderCtor = null, TransportCtor = null;
+    // ===== Locate globals from the UMD bundle =====
+    // Different builds have used slightly different global names; detect robustly.
+    const ESPLoaderCtor =
+      window.ESPLoader ||
+      (window.esptoolJs && window.esptoolJs.ESPLoader) ||
+      (window.esptool_js && window.esptool_js.ESPLoader) ||
+      (window.esptooljs && window.esptooljs.ESPLoader);
 
-    async function loadEsptool() {
-      try {
-        const esm = await import('https://esm.sh/esptool-js@0.5.7');
-        const web = await import('https://esm.sh/esptool-js@0.5.7/webserial.js');
-        if (esm?.ESPLoader && web?.Transport) {
-          ESPLoaderCtor = esm.ESPLoader;
-          TransportCtor = web.Transport;
-          log('✅ esptool-js (ESM) loaded.');
-          return;
-        }
-        throw new Error('ESM exports missing');
-      } catch (e) {
-        log('ℹ️ ESM import failed; trying UMD fallback… (' + e + ')');
-      }
-      // UMD fallback
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://unpkg.com/esptool-js@0.5.7/bundle.js';
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load UMD bundle.js'));
-        document.head.appendChild(s);
-      });
-      // UMD exposes a global; detect it
-      const g = window;
-      const ESPL =
-        g.ESPLoader ||
-        (g.esptoolJs && g.esptoolJs.ESPLoader) ||
-        (g.esptool_js && g.esptool_js.ESPLoader) ||
-        (g.esptooljs && g.esptooljs.ESPLoader);
-      // for UMD, Transport is attached at ESPL.Transport
-      if (ESPL && ESPL.Transport) {
-        ESPLoaderCtor = ESPL;
-        TransportCtor = ESPL.Transport;
-        log('✅ esptool-js (UMD) loaded.');
-        return;
-      }
-      throw new Error('UMD loaded but ESPLoader/Transport not found');
+    const TransportCtor =
+      (window.Transport) ||
+      (ESPLoaderCtor && ESPLoaderCtor.Transport) ||
+      (window.esptoolJs && window.esptoolJs.Transport) ||
+      (window.esptool_js && window.esptool_js.Transport) ||
+      (window.esptooljs && window.esptooljs.Transport);
+
+    if (!ESPLoaderCtor || !TransportCtor) {
+      log('❌ esptool-js UMD globals not found. Check that the bundle loaded (network/adblock?)');
+    } else {
+      log('✅ esptool-js UMD loaded.');
     }
 
     // ===== State =====
     let port = null, transport = null, loader = null;
     let connected = false, connecting = false;
 
-    // ESPLoader terminal interface
+    // ESPLoader terminal interface (must provide clean/write/writeLine)
     const term = { clean(){ logEl.textContent=""; }, write(d){ log(String(d)); }, writeLine(d){ log(String(d)); } };
 
     // Open only if needed; reuse if already open
@@ -125,16 +107,12 @@
 
     async function verifyMd5(off,len){ const md5=await loader.flashMd5sum(off,len); log(`MD5 @ 0x${off.toString(16)} = ${md5}`); }
 
-    // ===== Boot =====
-    if (!window.isSecureContext) log('❌ Needs HTTPS (GitHub Pages is fine).');
-    if (!('serial' in navigator)) log('❌ Web Serial not available (Chrome/Edge desktop).');
-
-    try { await loadEsptool(); } catch (e) { log('❌ Failed to load esptool-js: ' + e); }
-
     connectBtn.addEventListener('click', async () => {
       if (connecting || connected) { log('already connecting/connected'); return; }
       if (!ESPLoaderCtor || !TransportCtor) { log('❌ esptool-js not loaded'); return; }
-      if (!window.isSecureContext || !('serial' in navigator)) return;
+      if (!window.isSecureContext) return log('❌ Needs HTTPS (GitHub Pages is fine).');
+      if (!('serial' in navigator)) return log('❌ Web Serial not available (Chrome/Edge desktop).');
+
       connecting = true; connectBtn.disabled = true;
 
       try {
@@ -143,6 +121,7 @@
         log('port selected');
         await openPortIfNeeded(port);
 
+        // WebSerial transport (from UMD global)
         transport = new TransportCtor(port);
         if (transport.connect) {
           try { await transport.connect(115200); } catch(e){ log('transport.connect note: ' + e); }
@@ -153,7 +132,6 @@
         log('connecting to bootloader… (hold BOOT if required)');
         await loader.connect('default_reset', 7, true);
         log('connected. chip: ' + (await loader.chipName()));
-
         await withStubBaud(921600);
 
         connected = true;
@@ -195,7 +173,7 @@
       }
     });
 
-    // Release port on page unload
+    // Release port if you navigate away
     addEventListener('beforeunload', async ()=>{ await safeCloseAll('unload'); });
   </script>
 </body>
