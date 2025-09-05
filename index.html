@@ -1,28 +1,141 @@
 <!doctype html>
 <html>
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>My ESP Tool</title>
-  <link rel="stylesheet" href="style.css">
+  <meta charset="utf-8">
+  <title>ESP Flasher (Factory + OTA_1)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 20px; }
+    .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+    input[type="text"] { width: 160px; padding: 6px; }
+    button { padding: 8px 12px; cursor: pointer; }
+    #progress { width: 320px; height: 12px; background:#eee; border-radius: 6px; overflow: hidden; }
+    #bar { height: 100%; width:0%; background:#3b82f6; transition: width .1s linear; }
+    #log { white-space: pre-wrap; background:#111; color:#0f0; padding:10px; border-radius:6px; min-height:180px; max-height:40vh; overflow:auto; }
+    small { color:#555; }
+    label { font-weight: 600; }
+  </style>
 </head>
 <body>
-  <h1>My Custom ESP Flasher</h1>
-  <button id="connect">Connect ESP</button>
-  <pre id="log"></pre>
+  <h1>ESP Flasher (Factory + OTA_1)</h1>
+
+  <div class="row">
+    <button id="connect">🔌 Connect</button>
+    <button id="disconnect" disabled>🔒 Disconnect</button>
+    <button id="reset" disabled>🔁 Reset</button>
+  </div>
+
+  <div class="row">
+    <input type="file" id="fw" accept=".bin" />
+    <label for="factory">Factory Offset</label>
+    <input type="text" id="factory" value="0x20000">
+    <label for="ota1">OTA_1 Offset</label>
+    <input type="text" id="ota1" value="0x1C0000">
+  </div>
+
+  <div class="row">
+    <button id="flash" disabled>⚡ Flash Factory + OTA_1</button>
+    <div id="progress"><div id="bar"></div></div>
+    <span id="pct">0%</span>
+  </div>
+
+  <div class="row">
+    <small>
+      This will flash the same binary to <code>0x20000</code> and <code>0x1C0000</code>.  
+      Adjust if your partition table changes.
+    </small>
+  </div>
+
+  <h3>Log</h3>
+  <div id="log"></div>
 
   <script src="https://unpkg.com/esptool-js/bundle.js"></script>
   <script>
-    const log = (msg) => document.getElementById('log').textContent += msg + "\n";
-    document.getElementById('connect').onclick = async () => {
-      try {
-        const port = await navigator.serial.requestPort();
-        const loader = new window.ESPLoader(port, { baudrate: 115200, logger: log });
-        await loader.main();
-      } catch (err) {
-        log(err);
+    const $ = (sel) => document.querySelector(sel);
+    const logEl = $('#log');
+    const bar = $('#bar');
+    const pct = $('#pct');
+    const log = (m='') => { logEl.textContent += m + '\\n'; logEl.scrollTop = logEl.scrollHeight; };
+    const setProgress = (n) => { const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + '%'; pct.textContent = v + '%'; };
+
+    let port, loader, connected = false;
+
+    function parseHexOrDec(v) {
+      v = v.trim();
+      if (v.toLowerCase().startsWith('0x')) return parseInt(v, 16) >>> 0;
+      return parseInt(v, 10) >>> 0;
+    }
+
+    async function withStubBaud(targetBaud = 921600) {
+      await loader.runStub();
+      try { await loader.changeBaud(targetBaud); log('Baud changed to ' + targetBaud); }
+      catch (e) { log('Baud change failed: ' + e); }
+    }
+
+    async function flashOnce(binBytes, offset, onBlock) {
+      const total = binBytes.length;
+      const blockSize = loader.FLASH_WRITE_SIZE || 0x400;
+      const numBlocks = await loader.flashDeflBegin(total, total, offset);
+      for (let seq = 0; seq < numBlocks; seq++) {
+        const start = seq * blockSize, end = Math.min(start + blockSize, total);
+        const chunk = binBytes.subarray(start, end);
+        await loader.flashDeflBlock(chunk, seq, 5000);
+        onBlock?.(seq + 1, numBlocks);
       }
+      await loader.flashDeflFinish(false);
+    }
+
+    async function verifyMd5(offset, length) {
+      const md5 = await loader.flashMd5sum(offset, length);
+      log('MD5 @ 0x' + offset.toString(16) + ' = ' + md5);
+    }
+
+    $('#connect').onclick = async () => {
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+        loader = new window.ESPLoader({ transport: { device: port }, baudrate: 115200, terminal: { write: log } });
+        log('Connecting… (hold BOOT if needed)');
+        await loader.connect('default_reset', 7, true);
+        log('Connected. Chip: ' + (await loader.chipName()));
+        await withStubBaud(921600);
+        connected = true; $('#disconnect').disabled = false; $('#reset').disabled = false; $('#flash').disabled = false;
+      } catch (e) { log('Connect failed: ' + e); }
     };
+
+    $('#disconnect').onclick = async () => {
+      try { if (loader) await loader.after('no_reset'); if (port) await port.close(); } catch {}
+      connected = false; $('#disconnect').disabled = true; $('#reset').disabled = true; $('#flash').disabled = true; log('Disconnected.');
+    };
+
+    $('#reset').onclick = async () => { try { await loader.after('hard_reset'); log('Hard reset sent.'); } catch (e) { log('Reset failed: ' + e); } };
+
+    $('#flash').onclick = async () => {
+      const fileInput = $('#fw').files?.[0];
+      if (!connected) return log('Not connected.');
+      if (!fileInput) return log('Pick a .bin first.');
+
+      const factoryOff = parseHexOrDec($('#factory').value);
+      const ota1Off = parseHexOrDec($('#ota1').value);
+      const buf = new Uint8Array(await fileInput.arrayBuffer());
+
+      try {
+        setProgress(0);
+        log('--- Flashing Factory @ 0x' + factoryOff.toString(16) + ' ---');
+        await flashOnce(buf, factoryOff, (i, n) => setProgress((i/n)*50));
+        await verifyMd5(factoryOff, buf.length);
+
+        log('--- Flashing OTA_1 @ 0x' + ota1Off.toString(16) + ' ---');
+        await flashOnce(buf, ota1Off, (i, n) => setProgress(50 + (i/n)*50));
+        await verifyMd5(ota1Off, buf.length);
+
+        await loader.after('hard_reset');
+        log('✅ Done. Device reset.');
+        setProgress(100);
+      } catch (e) { log('❌ Flash failed: ' + e); }
+    };
+
+    if (!('serial' in navigator)) { log('Browser lacks Web Serial. Use Chrome/Edge on desktop.'); $('#connect').disabled = true; }
   </script>
 </body>
 </html>
