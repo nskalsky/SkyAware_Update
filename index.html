@@ -1,43 +1,161 @@
 <!doctype html>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Web Serial sanity check</title>
-<style>
-  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif; margin: 20px; }
-  #log { white-space: pre-wrap; background:#111; color:#0f0; padding:10px; border-radius:6px; min-height:200px; max-height:50vh; overflow:auto; }
-  button { padding:8px 12px; }
-</style>
-<h1>Web Serial sanity check</h1>
-<button id="connect">🔌 Connect</button>
-<pre id="log"></pre>
-<script>
-  const logEl = document.getElementById('log');
-  const log = m => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
-  log(`page loaded. secure=${window.isSecureContext} webSerial=${'serial' in navigator}`);
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ESP Flasher (Factory + OTA_1)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;margin:20px}
+    .row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:10px}
+    button{padding:8px 12px}
+    #log{white-space:pre-wrap;background:#111;color:#0f0;padding:10px;border-radius:6px;min-height:200px;max-height:50vh;overflow:auto}
+    #progress{width:320px;height:12px;background:#eee;border-radius:6px;overflow:hidden}
+    #bar{height:100%;width:0%;background:#3b82f6;transition:width .1s}
+    #pct{min-width:40px;display:inline-block}
+  </style>
+</head>
+<body>
+  <h1>ESP Flasher (Factory + OTA_1)</h1>
 
-  document.getElementById('connect').addEventListener('click', async () => {
-    try {
-      if (!window.isSecureContext) return log('❌ needs HTTPS (use your GitHub Pages URL).');
-      if (!('serial' in navigator)) return log('❌ Web Serial not available (Chrome/Edge desktop only).');
+  <div class="row">
+    <button id="connect">🔌 Connect</button>
+    <button id="disconnect" disabled>🔒 Disconnect</button>
+    <input type="file" id="fw" accept=".bin" />
+    <button id="flash" disabled>⚡ Flash both</button>
+  </div>
 
-      log('connect clicked');
-      const ports = await navigator.serial.getPorts();
-      const port = ports[0] || await navigator.serial.requestPort();
-      log('port selected: ' + (port.getInfo ? JSON.stringify(port.getInfo()) : 'ok'));
+  <div class="row">
+    <div id="progress"><div id="bar"></div></div>
+    <span id="pct">0%</span>
+  </div>
 
-      // if already open, don't open again
-      if (!port.readable || !port.writable) {
-        await port.open({ baudRate: 115200 });
-        log('port opened');
-      } else {
-        log('port already open (reusing)');
-      }
+  <pre id="log"></pre>
 
-      // close immediately so it’s free
-      try { await port.close(); log('port closed'); } catch (e) { log('close failed: ' + e); }
-    } catch (e) {
-      log('❌ error: ' + e);
+  <script type="module">
+    // Use ESM that resolves deps for browsers (no bundler needed)
+    import { ESPLoader } from "https://esm.sh/esptool-js@0.5.7";
+    import { Transport } from "https://esm.sh/esptool-js@0.5.7/webserial.js";
+
+    const $ = s => document.querySelector(s);
+    const connectBtn = $('#connect'), disconnectBtn = $('#disconnect'), flashBtn = $('#flash'), fwInput = $('#fw');
+    const logEl = $('#log'), bar = $('#bar'), pct = $('#pct');
+
+    const log = (m="") => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+    const setProgress = n => { const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + '%'; pct.textContent = v + '%'; };
+
+    // Terminal object: ESPLoader expects clean/write/writeLine
+    const term = { clean(){ logEl.textContent=""; }, write(d){ log(String(d)); }, writeLine(d){ log(String(d)); } };
+
+    let port = null, transport = null, loader = null;
+    let connected = false, connecting = false;
+
+    // Open only if needed; reuse if already open
+    async function openPortIfNeeded(p){
+      if (p.readable && p.writable) { log('Port already open (reusing).'); return; }
+      await p.open({ baudRate: 115200 });
+      log('Port opened.');
     }
-  });
-</script>
+
+    async function safeCloseAll(reason=''){
+      try { if (loader) await loader.after('no_reset'); } catch {}
+      try { if (transport) await transport.disconnect(); } catch {}
+      try { if (port?.readable || port?.writable) await port.close(); } catch {}
+      loader=null; transport=null; connected=false; connecting=false;
+      disconnectBtn.disabled = true; flashBtn.disabled = true;
+      if (reason) log('Closed: ' + reason);
+    }
+
+    async function withStubBaud(baud=921600){
+      await loader.runStub();
+      try { await loader.changeBaud(baud); log('Baud -> ' + baud); } catch(e){ log('Baud change failed: ' + e); }
+    }
+
+    async function flashOnce(bytes, offset, onBlock){
+      const total = bytes.length;
+      const blockSize = loader.FLASH_WRITE_SIZE || 0x400;
+      const blocks = await loader.flashDeflBegin(total, total, offset);
+      for (let i=0;i<blocks;i++){
+        const s=i*blockSize, e=Math.min(s+blockSize,total);
+        await loader.flashDeflBlock(bytes.subarray(s,e), i, 5000);
+        onBlock?.(i+1, blocks);
+      }
+      await loader.flashDeflFinish(false);
+    }
+
+    async function verifyMd5(off,len){ const md5=await loader.flashMd5sum(off,len); log(`MD5 @ 0x${off.toString(16)} = ${md5}`); }
+
+    // Basic environment check
+    log(`page loaded. secure=${window.isSecureContext} webSerial=${'serial' in navigator}`);
+    if (!window.isSecureContext) log('❌ Open this via HTTPS (GitHub Pages is fine).');
+    if (!('serial' in navigator)) log('❌ Use Chrome/Edge desktop (Web Serial required).');
+
+    connectBtn.addEventListener('click', async () => {
+      if (connecting || connected) { log('Already connecting/connected.'); return; }
+      if (!window.isSecureContext || !('serial' in navigator)) return;
+      connecting = true; connectBtn.disabled = true;
+
+      try {
+        // Prefer previously granted port; otherwise prompt
+        const granted = await navigator.serial.getPorts();
+        port = granted[0] || await navigator.serial.requestPort();
+        log('Port selected.');
+
+        await openPortIfNeeded(port);
+
+        // WebSerial transport for esptool-js
+        transport = new Transport(port);
+        try { await transport.connect(115200); } catch(e){ log('transport.connect note: ' + e); }
+
+        loader = new ESPLoader({ transport, baudrate: 115200, terminal: term });
+
+        log('Connecting to bootloader… (hold BOOT if required)');
+        await loader.connect('default_reset', 7, true);
+        log('Connected. Chip: ' + (await loader.chipName()));
+
+        await withStubBaud(921600);
+
+        connected = true;
+        disconnectBtn.disabled = false;
+        flashBtn.disabled = false;
+        log('✅ Ready to flash.');
+      } catch (e) {
+        log('❌ Connect failed: ' + e);
+        await safeCloseAll('connect failed');
+      } finally {
+        connecting = false;
+        if (!connected) connectBtn.disabled = false;
+      }
+    });
+
+    disconnectBtn.addEventListener('click', async () => { await safeCloseAll('user disconnect'); });
+
+    flashBtn.addEventListener('click', async () => {
+      if (!connected) return log('Not connected.');
+      const file = fwInput.files?.[0]; if (!file) return log('Pick a .bin first.');
+      const buf = new Uint8Array(await file.arrayBuffer());
+      const FACTORY = 0x20000, OTA1 = 0x1C0000;
+
+      try {
+        setProgress(0);
+        log(`--- Flashing Factory @ 0x${FACTORY.toString(16)} ---`);
+        await flashOnce(buf, FACTORY, (i,n)=>setProgress((i/n)*50));
+        await verifyMd5(FACTORY, buf.length);
+
+        log(`--- Flashing OTA_1 @ 0x${OTA1.toString(16)} ---`);
+        await flashOnce(buf, OTA1, (i,n)=>setProgress(50+(i/n)*50));
+        await verifyMd5(OTA1, buf.length);
+
+        await loader.after('hard_reset');
+        setProgress(100);
+        log('✅ Done. Device reset.');
+      } catch (e) {
+        log('❌ Flash failed: ' + e);
+      }
+    });
+
+    // Release port on page unload
+    addEventListener('beforeunload', async ()=>{ await safeCloseAll('unload'); });
+  </script>
+</body>
+</html>
 
