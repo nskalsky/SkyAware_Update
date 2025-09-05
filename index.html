@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8" />
-  <title>ESP Flasher (Factory + OTA_1)</title>
+  <title>ESP SkyAware (Factory + OTA_1)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     body { font-family: system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; margin: 20px; }
@@ -33,148 +33,112 @@
 
   <pre id="log"></pre>
 
-  <script type="module">
-    // ---- UI helpers ----
-    const $ = (s)=>document.querySelector(s);
-    const logEl = $('#log'), bar = $('#bar'), pct = $('#pct');
-    const log = (m="") => { logEl.textContent += m + "\\n"; logEl.scrollTop = logEl.scrollHeight; };
-    const setProgress = (n) => { const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + '%'; pct.textContent = v + '%'; };
+<script type="module">
+  import { ESPLoader } from "https://esm.sh/esptool-js@0.5.7";
 
-    // ---- Load ESPLoader with fallback (ESM -> UMD) ----
-    async function loadESPLoader() {
-      // Try clean ESM via esm.sh (resolves "pako" etc. for the browser)
-      try {
-        const mod = await import('https://esm.sh/esptool-js@0.5.7');
-        if (mod?.ESPLoader) { log('✅ ESPLoader (ESM) loaded.'); return mod.ESPLoader; }
-      } catch (e) {
-        log('ℹ️ ESM import failed; falling back to UMD… (' + e + ')');
-      }
+  const $ = (s)=>document.querySelector(s);
+  const logEl = $('#log'), bar = $('#bar'), pct = $('#pct');
+  const log = (m="") => { logEl.textContent += m + "\n"; logEl.scrollTop = logEl.scrollHeight; };
+  const setProgress = (n) => { const v = Math.max(0, Math.min(100, n|0)); bar.style.width = v + '%'; pct.textContent = v + '%'; };
 
-      // Fallback: UMD bundle (adds a global)
-      await new Promise((resolve, reject) => {
-        const s = document.createElement('script');
-        s.src = 'https://unpkg.com/esptool-js@0.5.7/bundle.js';
-        s.onload = resolve;
-        s.onerror = () => reject(new Error('Failed to load UMD bundle.js'));
-        document.head.appendChild(s);
+  // ✅ Provide all three methods ESPLoader expects
+  const term = {
+    clean() { logEl.textContent = ""; },
+    write(data) { log(String(data)); },
+    writeLine(data) { log(String(data)); },
+  };
+
+  let port, loader, connected = false;
+
+  async function withStubBaud(targetBaud = 921600) {
+    await loader.runStub();
+    try { await loader.changeBaud(targetBaud); log('Baud -> ' + targetBaud); }
+    catch (e) { log('Baud change failed: ' + e); }
+  }
+
+  async function flashOnce(bytes, offset, onBlock) {
+    const total = bytes.length;
+    const blockSize = loader.FLASH_WRITE_SIZE || 0x400;
+    const blocks = await loader.flashDeflBegin(total, total, offset);
+    for (let i = 0; i < blocks; i++) {
+      const s = i * blockSize, e = Math.min(s + blockSize, total);
+      await loader.flashDeflBlock(bytes.subarray(s, e), i, 5000);
+      onBlock?.(i + 1, blocks);
+    }
+    await loader.flashDeflFinish(false);
+  }
+
+  async function verifyMd5(offset, length) {
+    const md5 = await loader.flashMd5sum(offset, length);
+    log(`MD5 @ 0x${offset.toString(16)} = ${md5}`);
+  }
+
+  $('#connect').onclick = async () => {
+    try {
+      if (!('serial' in navigator)) return log("❌ Use Chrome/Edge over HTTPS; Web Serial missing.");
+      port = await navigator.serial.requestPort();
+      log('Port selected.');
+      await port.open({ baudRate: 115200 });
+      log('Port opened.');
+
+      // 🔧 Use the full terminal object here:
+      loader = new ESPLoader({
+        transport: { device: port },
+        baudrate: 115200,
+        terminal: term,
       });
 
-      // Try the known global shapes
-      const ESPL =
-        window.ESPLoader ||
-        (window.esptoolJs && window.esptoolJs.ESPLoader) ||
-        (window.esptool_js && window.esptool_js.ESPLoader) ||
-        (window.esptooljs && window.esptooljs.ESPLoader);
+      log('Connecting to bootloader… (hold BOOT if required)');
+      await loader.connect('default_reset', 7, true);
+      log('Connected. Chip: ' + (await loader.chipName()));
 
-      if (!ESPL) throw new Error('UMD loaded but ESPLoader global not found');
-      log('✅ ESPLoader (UMD) loaded.');
-      return ESPL;
-    }
+      await withStubBaud(921600);
 
-    // ---- Environment gating ----
-    if (!window.isSecureContext) log('❌ This page must be served over HTTPS (GitHub Pages is fine).');
-    if (!('serial' in navigator)) log('❌ Web Serial not available. Use Chrome/Edge desktop, not Safari/Firefox/iOS.');
-    let ESPLoaderCtor = null;
-    try {
-      ESPLoaderCtor = await loadESPLoader();
+      connected = true;
+      $('#disconnect').disabled = false;
+      $('#flash').disabled = false;
+      log('✅ Ready to flash.');
     } catch (e) {
-      log('❌ Failed to load esptool-js: ' + e);
+      log('❌ Connect failed: ' + e);
     }
+  };
 
-    // Enable connect only if everything required is present
-    if (ESPLoaderCtor && window.isSecureContext && ('serial' in navigator)) {
-      $('#connect').disabled = false;
-    } else {
-      log('ℹ️ Connect disabled due to missing prerequisites.');
+  $('#disconnect').onclick = async () => {
+    try { if (loader) await loader.after('no_reset'); if (port) await port.close(); } catch {}
+    connected = false;
+    $('#disconnect').disabled = true;
+    $('#flash').disabled = true;
+    log('Disconnected.');
+  };
+
+  $('#flash').onclick = async () => {
+    if (!connected) return log('Not connected.');
+    const file = $('#fw').files?.[0];
+    if (!file) return log('Pick a .bin first.');
+
+    const FACTORY = 0x20000;
+    const OTA1    = 0x1C0000;
+    const buf = new Uint8Array(await file.arrayBuffer());
+
+    try {
+      setProgress(0);
+      log(`--- Flashing Factory @ 0x${FACTORY.toString(16)} ---`);
+      await flashOnce(buf, FACTORY, (i,n)=>setProgress((i/n)*50));
+      await verifyMd5(FACTORY, buf.length);
+
+      log(`--- Flashing OTA_1 @ 0x${OTA1.toString(16)} ---`);
+      await flashOnce(buf, OTA1, (i,n)=>setProgress(50+(i/n)*50));
+      await verifyMd5(OTA1, buf.length);
+
+      await loader.after('hard_reset');
+      setProgress(100);
+      log('✅ Done. Device reset.');
+    } catch (e) {
+      log('❌ Flash failed: ' + e);
     }
+  };
+</script>
 
-    // ---- Flasher logic ----
-    let port = null, loader = null, connected = false;
-
-    async function withStubBaud(targetBaud = 921600) {
-      await loader.runStub();
-      try { await loader.changeBaud(targetBaud); log('Baud -> ' + targetBaud); }
-      catch (e) { log('Baud change failed: ' + e); }
-    }
-
-    async function flashOnce(bytes, offset, onBlock) {
-      const total = bytes.length;
-      const blockSize = loader.FLASH_WRITE_SIZE || 0x400;
-      const blocks = await loader.flashDeflBegin(total, total, offset);
-      for (let i = 0; i < blocks; i++) {
-        const s = i * blockSize, e = Math.min(s + blockSize, total);
-        await loader.flashDeflBlock(bytes.subarray(s, e), i, 5000);
-        onBlock?.(i + 1, blocks);
-      }
-      await loader.flashDeflFinish(false);
-    }
-
-    async function verifyMd5(offset, length) {
-      const md5 = await loader.flashMd5sum(offset, length);
-      log(`MD5 @ 0x${offset.toString(16)} = ${md5}`);
-    }
-
-    $('#connect').onclick = async () => {
-      try {
-        log('Connect clicked.');
-        // Make sure site permission is allowed for Serial:
-        // Chrome: site settings → Additional permissions → Serial ports → Allow
-        port = await navigator.serial.requestPort();
-        log('Port selected.');
-        await port.open({ baudRate: 115200 });
-        log('Port opened.');
-
-        loader = new ESPLoaderCtor({ transport: { device: port }, baudrate: 115200, terminal: { write: (s)=>log(String(s)) }});
-        log('Connecting to bootloader… (hold BOOT if required)');
-        await loader.connect('default_reset', 7, true);
-        log('Connected. Chip: ' + (await loader.chipName()));
-        await withStubBaud(921600);
-
-        connected = true;
-        $('#disconnect').disabled = false;
-        $('#flash').disabled = false;
-        log('✅ Ready to flash.');
-      } catch (e) {
-        log('❌ Connect failed: ' + e);
-        log('Hints: close Arduino/PlatformIO/serial terminals; check Chrome site permission; try another USB cable/port.');
-      }
-    };
-
-    $('#disconnect').onclick = async () => {
-      try { if (loader) await loader.after('no_reset'); if (port) await port.close(); } catch {}
-      connected = false;
-      $('#disconnect').disabled = true;
-      $('#flash').disabled = true;
-      log('Disconnected.');
-    };
-
-    $('#flash').onclick = async () => {
-      if (!connected) return log('Not connected.');
-      const file = $('#fw').files?.[0];
-      if (!file) return log('Pick a .bin first.');
-
-      const FACTORY = 0x20000;
-      const OTA1    = 0x1C0000;
-      const buf = new Uint8Array(await file.arrayBuffer());
-
-      try {
-        setProgress(0);
-        log(`--- Flashing Factory @ 0x${FACTORY.toString(16)} ---`);
-        await flashOnce(buf, FACTORY, (i,n)=>setProgress((i/n)*50));
-        await verifyMd5(FACTORY, buf.length);
-
-        log(`--- Flashing OTA_1 @ 0x${OTA1.toString(16)} ---`);
-        await flashOnce(buf, OTA1, (i,n)=>setProgress(50+(i/n)*50));
-        await verifyMd5(OTA1, buf.length);
-
-        await loader.after('hard_reset');
-        setProgress(100);
-        log('✅ Done. Device reset.');
-      } catch (e) {
-        log('❌ Flash failed: ' + e);
-      }
-    };
-  </script>
 </body>
 </html>
 
