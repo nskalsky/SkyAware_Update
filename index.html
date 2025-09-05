@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>My ESP Tool</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <h1>My Custom ESP Flasher</h1>
+  <button id="connect">Connect ESP</button>
+  <pre id="log"></pre>
+
+  <script src="https://unpkg.com/esptool-js/bundle.js"></script>
+  <script>
+    const log = (msg) => document.getElementById('log').textContent += msg + "\n";
+    document.getElementById('connect').onclick = async () => {
+      try {
+        const port = await navigator.serial.requestPort();
+        const loader = new window.ESPLoader(port, { baudrate: 115200, logger: log });
+        await loader.main();
+      } catch (err) {
+        log(err);
+      }
+    };
+  </script>
+</body>
+</html>
